@@ -1,0 +1,12 @@
+# ==============================================================
+# INFSCI 2140: ASSIGNMENT 4
+# Submitted by: Ben Stein (bss58@pitt.edu)
+# ==============================================================
+
+# IMPLEMENTATION NOTES
+Created using Python 3.10. 
+
+# EXECUTION TIME
+It takes xxxx minutes to execute all four queries.
+
+# RETRIEVAL RESULTS
