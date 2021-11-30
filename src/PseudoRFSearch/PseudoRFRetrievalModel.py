@@ -5,12 +5,10 @@ from SearchWithWhoosh.QueryRetreivalModel import QueryRetrievalModel
 from IndexingWithWhoosh.MyIndexReader import MyIndexReader
 
 class PseudoRFRetreivalModel:
-
-    indexReader=[]
-
     def __init__(self, ixReader):
         self.indexReader: MyIndexReader = ixReader
         self.orig_model = QueryRetrievalModel(self.indexReader)
+        self.collection_length = self.indexReader.get_collection_length()
         self.mu = 530
 
     # Search for the topic with pseudo relevance feedback.
@@ -22,8 +20,11 @@ class PseudoRFRetreivalModel:
     # return TopN most relevant document, in List structure
 
     def retrieveQuery(self, query: Query, topN, topK, alpha):
-        # this method will return the retrieval result of the given Query, and this result is enhanced with pseudo relevance feedback
-        query_tokens = query.getQueryContent().split()
+        query_tokens = []
+        for token in query.getQueryContent().split():
+            # shortcutting stop words lol
+            if token != 'OR' and self.indexReader.contains_token(token):
+                query_tokens.append(token)
 
         # (1) you should first use the original retrieval model to get TopK documents, which will be regarded as feedback documents
         feedback_results = self.orig_model.retrieveQuery(query, topK)
@@ -34,7 +35,7 @@ class PseudoRFRetreivalModel:
         # cache the postings for quick lookup
         postings = { token: self.indexReader.getPostingList(token) for token in query_tokens}
 
-        # key is the doc no, val is the final score (which is )
+        # key is the doc no, val is the final score
         # (we don't have to care which term generated which score)
         final_scores: dict[str, int] = {}
 
@@ -42,14 +43,14 @@ class PseudoRFRetreivalModel:
         # as a simple query likelihood probability and its final as a linear combination of the original
         # score and the feedback relevance value for the token
         for doc in feedback_results:
-            length = self.indexReader.getDocLength(doc.getDocId())
+            doc_length = self.indexReader.getDocLength(doc.getDocId())
             final_scores[doc.docno] = 1
 
             for token in query_tokens:
                 # original score is simple posterior probability
                 token_count_in_doc = postings[token].get(doc.docno, 0)
-                original_score = token_count_in_doc / length
-
+                original_score = self.get_dirichlet_prior(token, token_count_in_doc, doc_length)
+                if original_score == 0: print('orig 0', token)
                 # final score given by a linear combination: alpha * Q|D + (1-alpha) Q|Feedbackdocs
                 final_score = alpha * original_score + (1-alpha) * rf_scores[token]
 
@@ -58,13 +59,19 @@ class PseudoRFRetreivalModel:
                 # # for this doc consecutively obtain the document's overall score across all query terms
                 final_scores[doc.docno] *= final_score
 
-        # sort results by final score and retrieve top N
-        sorted_results = sorted(feedback_results, key = lambda x: final_scores[x.docno], reverse=True)
-        return sorted_results[:20]
+        # update the feedback documents with their adjusted score (so that when the assignment prints,
+        # it prints the post-RF score)
+        for doc in feedback_results:
+            doc.setScore(final_scores[doc.docno])
 
-    def get_dirichlet_prior(self, occurrence_count: int, doc_length: int):
-        term_probability = occurrence_count / doc_length
-        numerator = occurrence_count + (self.mu * term_probability)
+        # sort results by final score and retrieve top N
+        sorted_results = sorted(feedback_results, key = lambda x: x.getScore(), reverse=True)
+        return sorted_results[:topN]
+
+    def get_dirichlet_prior(self, token: str, occurrences_in_document: int, doc_length: int):
+        collection_probability = self.indexReader.CollectionFreq(token) / self.collection_length
+
+        numerator = occurrences_in_document + (self.mu * collection_probability)
         denominator = doc_length + self.mu
 
         return numerator / denominator
@@ -76,12 +83,13 @@ class PseudoRFRetreivalModel:
             doc_tokens = self.indexReader.get_doc_content(result.docno).split()
             pseudo_doc += doc_tokens
 
+        # get inputs needed for dirichlet prior
         doc_length = len(pseudo_doc)
         term_counts = Counter(pseudo_doc)
-        rf_scores = {}
 
-        # get P(query | pseudo-doc)
+        # get smoothed P(query | pseudo-doc)
+        rf_scores = {}
         for token in query_tokens:
-            rf_scores[token] = self.get_dirichlet_prior(term_counts[token], doc_length)        
-        
+            rf_scores[token] = self.get_dirichlet_prior(token=token, occurrences_in_document=term_counts[token], doc_length=doc_length)
+                
         return rf_scores
